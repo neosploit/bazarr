@@ -53,6 +53,11 @@ services:
       # Timezone (e.g., Europe/Budapest, America/New_York)
       - TZ=${TZ:-UTC}
 
+      # Optional: read the official provider catalog from a fork of it. The fork
+      # replaces the upstream catalog: its plugins are trusted and may replace
+      # built-in providers. Leave unset to use the upstream catalog.
+      # - BAZARR_PROVIDER_HUB_CATALOG_URL=https://github.com/<owner>/bazarr-provider-catalog/blob/beta/catalog.json
+
     volumes:
       # Configuration directory - contains database, logs, and settings
       - ${CONFIG_PATH:-./config}:/config

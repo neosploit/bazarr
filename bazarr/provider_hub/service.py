@@ -1177,6 +1177,12 @@ def _normalize_catalog_manifest(manifest: dict[str, Any], source: dict[str, Any]
     manifest_source.setdefault("catalog_url", source.get("url"))
     manifest_source["commit"] = commit
     manifest_source["trusted"] = bool(source.get("trusted", False))
+    if source.get("id") == OFFICIAL_CATALOG_SOURCE_ID:
+        # A fork of the catalog keeps the upstream repository in its manifests (the
+        # catalog SDK requires it), but its commits live in the fork. Bundles are
+        # fetched from, and installed trust is checked against, the repository the
+        # official source reads. With the upstream catalog this changes nothing.
+        manifest_source["repo"] = OFFICIAL_CATALOG_REPO
     normalized["source"] = manifest_source
     return normalized
 

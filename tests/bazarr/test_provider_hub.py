@@ -10104,3 +10104,78 @@ def test_an_unparseable_state_document_refuses_a_hub_enable_change(tmp_path, mon
 
     assert status == 400, body
     assert state_path.read_bytes() == before
+
+
+# A self-hosted build can point the official source at a fork of the catalog.
+
+_FORK_CATALOG_URL = "https://github.com/fork/bazarr-provider-catalog/blob/beta/catalog.json"
+_FORK_CATALOG_REPO = "fork/bazarr-provider-catalog"
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, None),
+    ("", None),
+    ("   ", None),
+    (_FORK_CATALOG_URL, _FORK_CATALOG_URL),
+    (f"  {_FORK_CATALOG_URL}  ", _FORK_CATALOG_URL),
+    ("http://github.com/fork/bazarr-provider-catalog/blob/beta/catalog.json", None),
+    ("https://gitlab.com/fork/bazarr-provider-catalog/blob/beta/catalog.json", None),
+    ("https://github.com/fork/bazarr-provider-catalog", None),
+    ("https://github.com/fork/bazarr-provider-catalog/tree/beta/catalog.json", None),
+])
+def test_the_official_catalog_url_comes_from_the_environment(value, expected):
+    from provider_hub.state import (
+        DEFAULT_OFFICIAL_CATALOG_URL,
+        OFFICIAL_CATALOG_URL_ENV,
+        _catalog_repo,
+        _official_catalog_url,
+    )
+
+    environ = {} if value is None else {OFFICIAL_CATALOG_URL_ENV: value}
+    # Anything but a GitHub file URL keeps the upstream catalog, so a typo never stops Bazarr+.
+    assert _official_catalog_url(environ) == (expected or DEFAULT_OFFICIAL_CATALOG_URL)
+    assert _catalog_repo(_FORK_CATALOG_URL) == _FORK_CATALOG_REPO
+    assert _catalog_repo(DEFAULT_OFFICIAL_CATALOG_URL) == "LavX/bazarr-provider-catalog"
+
+
+def test_a_forked_official_catalog_is_fetched_and_trusted_from_the_fork(tmp_path, monkeypatch):
+    from provider_hub.service import refresh_catalog
+    from provider_hub.state import load_state
+
+    monkeypatch.setattr("provider_hub.state.OFFICIAL_CATALOG_URL", _FORK_CATALOG_URL)
+    monkeypatch.setattr("provider_hub.state.OFFICIAL_CATALOG_REPO", _FORK_CATALOG_REPO)
+    monkeypatch.setattr("provider_hub.service.OFFICIAL_CATALOG_REPO", _FORK_CATALOG_REPO)
+    # Trust is checked against the fork's own branches, so GitHub answers for the fork.
+    monkeypatch.setitem(globals(), "_OFFICIAL_REPO_API", f"https://api.github.com/repos/{_FORK_CATALOG_REPO}")
+    # The fork's manifests still name the upstream repository, as the catalog SDK requires.
+    github = _FakeGitHub(monkeypatch, providers=[_official_manifest("examplehub", commit=_BETA)])
+    calls = []
+
+    def get(url, timeout, **kwargs):
+        calls.append(url)
+        return github.get(url, timeout, **kwargs)
+
+    monkeypatch.setattr("provider_hub.service.requests.get", get)
+    from_fork = _official_manifest("forkhub", commit=_BETA)
+    from_fork["source"]["repo"] = _FORK_CATALOG_REPO
+    from_elsewhere = _official_manifest("upstreamhub", commit=_BETA)
+    _hub_state(tmp_path, monkeypatch, installations={
+        **_installed(from_fork, trusted=True, source_bound=True, source_id="official"),
+        **_installed(from_elsewhere, trusted=True, source_bound=True, source_id="official"),
+    })
+
+    refresh_catalog()
+
+    state = load_state()
+    official = state["catalog_sources"]["official"]
+    assert (official["url"], official["trusted"], official["resolved_commit"]) == (_FORK_CATALOG_URL, True, _BETA)
+    assert f"https://github.com/{_FORK_CATALOG_REPO}/info/refs?service=git-upload-pack" in calls
+    assert f"https://raw.githubusercontent.com/{_FORK_CATALOG_REPO}/{_BETA}/catalog.json" in calls
+    assert not any("LavX" in url for url in calls)
+    entry = next(item for item in state["catalog_entries"].values() if item["provider_id"] == "examplehub")
+    # Its bundle is fetched from the fork, where the commit lives, and it is trusted.
+    assert entry["trusted"] is True
+    assert entry["manifest"]["source"]["repo"] == _FORK_CATALOG_REPO
+    assert state["installations"]["forkhub"]["trusted"] is True
+    # An install whose code names another repository is still not trusted.
+    assert state["installations"]["upstreamhub"]["trusted"] is False

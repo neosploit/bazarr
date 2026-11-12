@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import contextlib
@@ -10,14 +11,47 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlparse
 
 from .kinds import SUBTITLE_PROVIDER, kind_of
 
 
+logger = logging.getLogger(__name__)
+
 OFFICIAL_CATALOG_SOURCE_ID = "official"
 OFFICIAL_CATALOG_SOURCE_NAME = "Official Bazarr Provider Catalog"
-OFFICIAL_CATALOG_URL = "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json"
-OFFICIAL_CATALOG_REPO = "LavX/bazarr-provider-catalog"
+DEFAULT_OFFICIAL_CATALOG_URL = "https://github.com/LavX/bazarr-provider-catalog/blob/main/catalog.json"
+# A self-hosted build can point the official source at a fork of the catalog, for
+# example https://github.com/<owner>/bazarr-provider-catalog/blob/beta/catalog.json.
+# The fork then takes the official catalog's place: its plugins are trusted, may
+# replace built-in providers, and their commits are checked against the fork's own
+# main and beta branches.
+OFFICIAL_CATALOG_URL_ENV = "BAZARR_PROVIDER_HUB_CATALOG_URL"
+
+
+def _official_catalog_url(environ=os.environ) -> str:
+    url = (environ.get(OFFICIAL_CATALOG_URL_ENV) or "").strip()
+    if not url:
+        return DEFAULT_OFFICIAL_CATALOG_URL
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or len(parts) < 5 or parts[2] not in (
+            "blob", "raw"):
+        # A typo must not stop Bazarr+ from starting; the upstream catalog keeps serving.
+        logger.error("%s must be a GitHub file URL such as "
+                     "https://github.com/<owner>/<repo>/blob/<branch>/catalog.json; using %s",
+                     OFFICIAL_CATALOG_URL_ENV, DEFAULT_OFFICIAL_CATALOG_URL)
+        return DEFAULT_OFFICIAL_CATALOG_URL
+    return url
+
+
+def _catalog_repo(url: str) -> str:
+    owner, repo = [part for part in urlparse(url).path.split("/") if part][:2]
+    return f"{owner}/{repo}"
+
+
+OFFICIAL_CATALOG_URL = _official_catalog_url()
+OFFICIAL_CATALOG_REPO = _catalog_repo(OFFICIAL_CATALOG_URL)
 _STATE_LOCK = threading.RLock()
 
 
