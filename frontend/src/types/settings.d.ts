@@ -22,6 +22,7 @@ interface Settings {
   anticaptcha: Settings.Anticaptcha;
   deathbycaptcha: Settings.DeathByCaptche;
   captchaai: Settings.CaptchaAI;
+  twocaptcha: Settings.TwoCaptcha;
   // Providers
   opensubtitlescom: Settings.OpenSubtitlesCom;
   addic7ed: Settings.Addic7ed;
@@ -289,6 +290,10 @@ declare namespace Settings {
 
   interface CaptchaAI {
     captchaai_key?: string;
+  }
+
+  interface TwoCaptcha {
+    twocaptcha_key?: string;
   }
 
   // Providers

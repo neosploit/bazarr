@@ -121,6 +121,11 @@ _STATE_TEXT_FIELDS = frozenset({
 _refresh_lock = RLock()
 _refresh_local = local()
 
+# Credentials the process mints for itself at run time, such as the Provider Hub
+# captcha relay's token. No setting or Hub state holds them, so every refresh
+# adds them back to the set it collects.
+_RUNTIME_VALUES: 'set[str]' = set()
+
 
 def registered_secret_values() -> frozenset[str]:
     """The exact credential values currently masked in text."""
@@ -158,10 +163,20 @@ def register_secret_values(values: Iterable[Any]) -> int:
     return len(registered)
 
 
+def add_runtime_secret_value(value: str) -> None:
+    """Mask a credential the process minted at run time, now and after every
+    later refresh."""
+    with _refresh_lock:
+        _RUNTIME_VALUES.add(value)
+        register_secret_values(registered_secret_values() | {value})
+
+
 def clear_secret_values() -> None:
     """Forget every registered value, so tests and a torn-down boot leave no
     stale credential masked."""
-    register_secret_values(())
+    with _refresh_lock:
+        _RUNTIME_VALUES.clear()
+        register_secret_values(())
 
 
 def scrub_text(text: str) -> str:
@@ -344,6 +359,7 @@ def refresh_secret_values(settings_obj=None, state=None) -> int:
                 from app.config import settings as settings_obj
             values = collect_settings_secret_values(settings_obj)
             values |= collect_hub_secret_values(state)
+            values |= _RUNTIME_VALUES
         except Exception as error:
             logger.warning("The credential values to scrub could not be collected: %s",
                            type(error).__name__)

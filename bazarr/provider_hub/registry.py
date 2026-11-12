@@ -20,7 +20,7 @@ from .migration import (
 )
 from .protocol import candidate_from_worker, language_to_payload, video_to_payload, worker_download_to_content
 from .state import active_installations
-from . import runtime_status
+from . import captcha_relay, runtime_status
 from .worker import ProviderWorkerClient, RequestNotAdmitted, WorkerBusy, WorkerError, worker_command
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,21 @@ class HubProxyProvider(Provider):
             return self.worker_client
         raise WorkerError("Provider Hub worker is not configured")
 
-    def _request_timeout(self):
+    def _worker_config(self):
+        """The config the worker gets: the user's, and for a plugin whose manifest
+        sets anti_captcha, the captcha relay when the user has a vendor set up."""
+        manifest = getattr(self.__class__, "manifest", None)
+        raw = getattr(manifest, "raw", None)
+        if not isinstance(raw, dict) or raw.get("anti_captcha") is not True:
+            return self.config
+        try:
+            relay = captcha_relay.solver_config(self.config)
+        except Exception:
+            logger.exception("Provider Hub: the captcha relay could not start for %s", self.provider_name)
+            return self.config
+        return {**self.config, **relay} if relay else self.config
+
+    def _request_timeout(self, config=None):
         # The host deadline must never fire before the worker's own per-operation
         # timeout, or a long transcription is killed regardless of the user's
         # settings (issue: WhisperAI and 30 second worker timeout). Derive the
@@ -159,16 +173,21 @@ class HubProxyProvider(Provider):
         # per-phase timeout, so this is an accepted limitation, not a hard-kill
         # regression of the 30s bug.) The plugin-declared value is clamped to the
         # maximum BEFORE the margin is added so the margin survives at the cap,
-        # then floored by the global default backstop.
+        # then floored by the global default backstop. A captcha solver's wait
+        # counts too, so a plugin waiting on the relay is not killed mid-solve.
+        config = self.config if config is None else config
         declared = []
         explicit = _coerce_timeout(self.timeout)
         if explicit is not None:
             declared.append(explicit)
         for key in ("worker_timeout", "timeout_seconds", "timeout"):
-            value = _coerce_timeout(self.config.get(key))
+            value = _coerce_timeout(config.get(key))
             if value is not None:
                 declared.append(value)
-        for key, raw in self.config.items():
+        solver_ms = _coerce_timeout(config.get("captcha_solver_timeout_ms"))
+        if solver_ms is not None:
+            declared.append(solver_ms / 1000)
+        for key, raw in config.items():
             if key.endswith("_timeout_seconds"):
                 value = _coerce_timeout(raw)
                 if value is not None:
@@ -181,14 +200,15 @@ class HubProxyProvider(Provider):
         return max(base + _HOST_TIMEOUT_MARGIN_SECONDS, global_default)
 
     def list_subtitles(self, video, languages):
-        timeout = self._request_timeout()
+        config = self._worker_config()
+        timeout = self._request_timeout(config)
         status_generation = runtime_status.generation(self.provider_name)
         status_configuration_generation = runtime_status.configuration_generation(
             self.provider_name
         )
         request = {
             "provider": self.provider_name,
-            "config": self.config,
+            "config": config,
             "video": video_to_payload(video),
             "languages": [language_to_payload(item) for item in languages],
         }
@@ -213,7 +233,8 @@ class HubProxyProvider(Provider):
         return subtitles
 
     def download_subtitle(self, subtitle):
-        timeout = self._request_timeout()
+        config = self._worker_config()
+        timeout = self._request_timeout(config)
         status_generation = runtime_status.generation(self.provider_name)
         status_configuration_generation = runtime_status.configuration_generation(
             self.provider_name
@@ -222,7 +243,7 @@ class HubProxyProvider(Provider):
             "provider": self.provider_name,
             "provider_payload": subtitle.provider_payload,
             "language": language_to_payload(subtitle.language),
-            "config": self.config,
+            "config": config,
         }
         result = self._gated_request("download", request, timeout)
         _consume_runtime_events(
@@ -241,7 +262,7 @@ class HubProxyProvider(Provider):
                 "members": members,
                 "season": context.get("season", getattr(subtitle, "season", None)),
                 "episode": context.get("episode", getattr(subtitle, "episode", None)),
-                "config": self.config,
+                "config": config,
             }
             if "absolute_episode" in context:
                 selector_payload["absolute_episode"] = context["absolute_episode"]

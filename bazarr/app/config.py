@@ -341,7 +341,7 @@ validators = [
     Validator('general.upgrade_manual', must_exist=True, default=False, is_type_of=bool),
     Validator('general.upgrade_translated', must_exist=True, default=False, is_type_of=bool),
     Validator('general.anti_captcha_provider', must_exist=True, default=None, is_type_of=(NoneType, str),
-              is_in=[None, 'anti-captcha', 'death-by-captcha', 'captchaai']),
+              is_in=[None, 'anti-captcha', 'death-by-captcha', 'captchaai', '2captcha']),
     Validator('general.wanted_search_frequency', must_exist=True, default=6, is_type_of=int, 
               is_in=[6, 12, 24, 168, ONE_HUNDRED_YEARS_IN_HOURS]),
     Validator('general.wanted_search_frequency_movie', must_exist=True, default=6, is_type_of=int,
@@ -699,6 +699,9 @@ validators = [
 
     # captchaai section
     Validator('captchaai.captchaai_key', must_exist=True, default='', is_type_of=str, cast=str),
+
+    # twocaptcha section
+    Validator('twocaptcha.twocaptcha_key', must_exist=True, default='', is_type_of=str, cast=str),
 
     # napisy24 section
     Validator('napisy24.username', must_exist=True, default='', is_type_of=str, cast=str),
@@ -2892,7 +2895,7 @@ def _save_settings(settings_items, native_configuration=None, *, strict_metadata
 
         if key in ['settings-general-anti_captcha_provider', 'settings-anticaptcha-anti_captcha_key',
                    'settings-deathbycaptcha-username', 'settings-deathbycaptcha-password',
-                   'settings-captchaai-captchaai_key']:
+                   'settings-captchaai-captchaai_key', 'settings-twocaptcha-twocaptcha_key']:
             configure_captcha = True
 
         if key in ['update_schedule', 'settings-general-use_sonarr', 'settings-general-use_radarr',
@@ -3425,6 +3428,9 @@ def configure_captcha_func():
     elif settings.general.anti_captcha_provider == 'captchaai' and settings.captchaai.captchaai_key != "":
         os.environ["ANTICAPTCHA_CLASS"] = 'CaptchaAIProxyLess'
         os.environ["ANTICAPTCHA_ACCOUNT_KEY"] = str(settings.captchaai.captchaai_key)
+    elif settings.general.anti_captcha_provider == '2captcha' and settings.twocaptcha.twocaptcha_key != "":
+        os.environ["ANTICAPTCHA_CLASS"] = 'TwoCaptchaProxyLess'
+        os.environ["ANTICAPTCHA_ACCOUNT_KEY"] = str(settings.twocaptcha.twocaptcha_key)
     else:
         os.environ["ANTICAPTCHA_CLASS"] = ''
         # Clear the key too, or disabling the vendor leaves the previous

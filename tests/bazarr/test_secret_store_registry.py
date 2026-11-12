@@ -33,7 +33,8 @@ def test_user_visible_includes_provider_passwords_and_keys():
     for key in ("opensubtitles.password", "addic7ed.password",
                 "subdl.api_key", "subsource.apikey",
                 "translator.openrouter_api_key", "translator.lingarr_token",
-                "anticaptcha.anti_captcha_key", "captchaai.captchaai_key"):
+                "anticaptcha.anti_captcha_key", "captchaai.captchaai_key",
+                "twocaptcha.twocaptcha_key"):
         assert is_user_visible_secret(key), f"{key} should be user-visible"
 
 

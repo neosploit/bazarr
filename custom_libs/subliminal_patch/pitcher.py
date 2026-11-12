@@ -9,7 +9,8 @@ import base64
 import requests
 from subliminal.cache import region
 from dogpile.cache.api import NO_VALUE
-from python_anticaptcha import AnticaptchaClient, NoCaptchaTaskProxylessTask, NoCaptchaTask, AnticaptchaException
+from python_anticaptcha import (AnticaptchaClient, NoCaptchaTaskProxylessTask, NoCaptchaTask, AnticaptchaException,
+                                RecaptchaV3TaskProxyless)
 from deathbycaptcha import SocketClient as DBCClient, DEFAULT_TOKEN_TIMEOUT
 import six
 from six.moves import range
@@ -18,6 +19,22 @@ from subliminal.exceptions import ConfigurationError
 
 
 logger = logging.getLogger(__name__)
+
+RECAPTCHA_V2 = "v2"
+RECAPTCHA_V3 = "v3"
+# The defaults the vendors themselves use when a v3 task names no action or score.
+DEFAULT_V3_ACTION = "verify"
+DEFAULT_V3_MIN_SCORE = 0.3
+# Anti-Captcha takes only these v3 thresholds.
+ANTICAPTCHA_V3_MIN_SCORES = (0.3, 0.7, 0.9)
+
+
+def anticaptcha_v3_min_score(min_score):
+    """The lowest threshold Anti-Captcha takes that still clears min_score."""
+    for allowed in ANTICAPTCHA_V3_MIN_SCORES:
+        if min_score <= allowed:
+            return allowed
+    return ANTICAPTCHA_V3_MIN_SCORES[-1]
 
 
 class PitcherRegistry(object):
@@ -62,6 +79,11 @@ class Pitcher(object):
     website_name = None
     solve_time = None
     success = False
+    # reCAPTCHA v3 is score based: the site names an action, and the solver must
+    # bring back a token whose score clears the site's threshold.
+    version = RECAPTCHA_V2
+    action = None
+    min_score = None
 
     def __init__(self, website_name, website_url, website_key, tries=3, client_key=None, *args, **kwargs):
         self.tries = tries
@@ -74,6 +96,18 @@ class Pitcher(object):
         self.website_url = website_url
         self.success = False
         self.solve_time = None
+
+        version = kwargs.get("version") or RECAPTCHA_V2
+        if version not in (RECAPTCHA_V2, RECAPTCHA_V3):
+            raise ValueError("Unsupported reCAPTCHA version: %r" % (version,))
+        self.version = version
+        if version == RECAPTCHA_V3:
+            self.action = kwargs.get("action") or DEFAULT_V3_ACTION
+            self.min_score = kwargs.get("min_score") or DEFAULT_V3_MIN_SCORE
+
+    @property
+    def is_v3(self):
+        return self.version == RECAPTCHA_V3
 
     def get_client(self):
         raise NotImplementedError
@@ -117,8 +151,13 @@ class AntiCaptchaProxyLessPitcher(Pitcher):
         return AnticaptchaClient(self.client_key, self.language_pool, self.host, self.use_ssl)
 
     def get_job(self):
-        task = NoCaptchaTaskProxylessTask(website_url=self.website_url, website_key=self.website_key,
-                                          is_invisible=self.is_invisible)
+        if self.is_v3:
+            task = RecaptchaV3TaskProxyless(website_url=self.website_url, website_key=self.website_key,
+                                            min_score=anticaptcha_v3_min_score(self.min_score),
+                                            page_action=self.action)
+        else:
+            task = NoCaptchaTaskProxylessTask(website_url=self.website_url, website_key=self.website_key,
+                                              is_invisible=self.is_invisible)
         return self.client.createTask(task)
 
     def _throw(self):
@@ -189,6 +228,9 @@ class AntiCaptchaPitcher(AntiCaptchaProxyLessPitcher):
         )
 
     def get_job(self):
+        if self.is_v3:
+            # Anti-Captcha solves v3 only without a proxy.
+            return super(AntiCaptchaPitcher, self).get_job()
         task = NoCaptchaTask(website_url=self.website_url, website_key=self.website_key, **self.proxy,
                              user_agent=self.user_agent, cookies=self.cookies, is_invisible=self.is_invisible)
         return self.client.createTask(task)
@@ -203,7 +245,7 @@ class DBCProxyLessPitcher(Pitcher):
 
     def __init__(self, website_name, website_url, website_key,
                  timeout=DEFAULT_TOKEN_TIMEOUT, tries=3, *args, **kwargs):
-        super(DBCProxyLessPitcher, self).__init__(website_name, website_url, website_key, tries=tries)
+        super(DBCProxyLessPitcher, self).__init__(website_name, website_url, website_key, tries=tries, **kwargs)
 
         self.username, self.password = self.client_key.split(":", 1)
         self.timeout = timeout
@@ -214,12 +256,20 @@ class DBCProxyLessPitcher(Pitcher):
     def get_job(self):
         pass
 
+    # Death by Captcha's token types: 4 is reCAPTCHA v2, 5 is reCAPTCHA v3.
+    @property
+    def token_type(self):
+        return 5 if self.is_v3 else 4
+
     @property
     def payload_dict(self):
-        return {
+        payload = {
             "googlekey": self.website_key,
             "pageurl": self.website_url
         }
+        if self.is_v3:
+            payload.update({"action": self.action, "min_score": self.min_score})
+        return payload
 
     def _throw(self):
         super(DBCProxyLessPitcher, self)._throw()
@@ -227,7 +277,7 @@ class DBCProxyLessPitcher(Pitcher):
         for i in range(self.tries):
             try:
                 #balance = self.client.get_balance()
-                data = self.client.decode(timeout=self.timeout, type=4, token_params=payload)
+                data = self.client.decode(timeout=self.timeout, type=self.token_type, token_params=payload)
                 if data and data["is_correct"] and data["text"]:
                     self.success = True
                     return data["text"]
@@ -260,6 +310,7 @@ class DBCPitcher(DBCProxyLessPitcher):
 class CaptchaAIProxyLessPitcher(Pitcher):
     name = "CaptchaAIProxyLess"
     source = "captchaai.com"
+    vendor_name = "CaptchaAI"
     host = "https://ocr.captchaai.com"
     timeout = 180
 
@@ -274,7 +325,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
 
     def get_client(self):
         # CaptchaAI exposes a 2Captcha-compatible HTTP API (in.php/res.php), so a
-        # plain requests session is all that is needed.
+        # plain requests session is all that is needed, for 2Captcha itself too.
         return requests.Session()
 
     def get_job(self):
@@ -290,7 +341,9 @@ class CaptchaAIProxyLessPitcher(Pitcher):
             "pageurl": self.website_url,
             "json": 1,
         }
-        if self.is_invisible:
+        if self.is_v3:
+            params.update({"version": RECAPTCHA_V3, "action": self.action, "min_score": self.min_score})
+        elif self.is_invisible:
             params["invisible"] = 1
         if self.user_agent:
             params["userAgent"] = self.user_agent
@@ -317,9 +370,9 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                         time.sleep(5.0)
                         continue
                     elif request in ("ERROR_KEY_DOES_NOT_EXIST", "ERROR_WRONG_USER_KEY"):
-                        logger.error("%s: Bad CaptchaAI API key", self.website_name)
+                        logger.error("%s: Bad %s API key", self.website_name, self.vendor_name)
                         return
-                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name, request)
+                    logger.error("%s: %s returned an error: %s", self.website_name, self.vendor_name, request)
                     if i >= self.tries - 1:
                         return
                     time.sleep(5.0)
@@ -344,7 +397,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                         return res_payload.get("request")
                     if res_payload.get("request") == "CAPCHA_NOT_READY":
                         continue
-                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name,
+                    logger.error("%s: %s returned an error: %s", self.website_name, self.vendor_name,
                                  res_payload.get("request"))
                     poll_failed = True
                     break
@@ -375,6 +428,37 @@ class CaptchaAIPitcher(CaptchaAIProxyLessPitcher):
     @property
     def in_params(self):
         params = super(CaptchaAIPitcher, self).in_params
+        if self.proxy:
+            params.update({"proxy": self.proxy, "proxytype": self.proxy_type})
+        return params
+
+
+@registry.register
+class TwoCaptchaProxyLessPitcher(CaptchaAIProxyLessPitcher):
+    # 2Captcha is the API CaptchaAI copies (in.php/res.php, the same parameters and
+    # replies), so only the host and the names differ.
+    name = "TwoCaptchaProxyLess"
+    source = "2captcha.com"
+    vendor_name = "2Captcha"
+    host = "https://2captcha.com"
+
+
+@registry.register
+class TwoCaptchaPitcher(TwoCaptchaProxyLessPitcher):
+    name = "TwoCaptcha"
+    proxy = None
+    needs_proxy = True
+    proxy_type = "HTTP"
+
+    def __init__(self, *args, **kwargs):
+        # No default: a pitcher that declares needs_proxy must fail loudly
+        # when constructed without one, like the other proxy pitchers.
+        self.proxy = kwargs.pop("proxy")
+        super(TwoCaptchaPitcher, self).__init__(*args, **kwargs)
+
+    @property
+    def in_params(self):
+        params = super(TwoCaptchaPitcher, self).in_params
         if self.proxy:
             params.update({"proxy": self.proxy, "proxytype": self.proxy_type})
         return params
