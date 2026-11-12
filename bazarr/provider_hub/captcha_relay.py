@@ -15,7 +15,9 @@ and a plugin is never given Bazarr's API key. It starts the first time a plugin
 needs it.
 
 Request: ``POST /solve`` with ``Authorization: Bearer <token>`` and a JSON body
-``{"site_key": str, "site_url": str, "invisible": bool, "provider": str}``.
+``{"site_key": str, "site_url": str, "invisible": bool, "provider": str}``. A
+reCAPTCHA v3 adds ``"type": "recaptcha_v3"`` and, optionally, its ``action`` and
+``min_score``; without a ``type`` the captcha is a reCAPTCHA v2.
 Reply: ``200 {"token": str}``, or an error status with ``{"error": str}``.
 """
 import hmac
@@ -26,6 +28,7 @@ import re
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -39,7 +42,24 @@ MAX_CONCURRENT_SOLVES = 2
 _MAX_BODY_BYTES = 4096
 _SITE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 _PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# reCAPTCHA allows letters, digits, slashes and underscores in an action name.
+_ACTION_RE = re.compile(r"^[A-Za-z0-9_/]{1,100}$")
 _MAX_URL_LENGTH = 2048
+_TYPES = {"recaptcha_v2": "v2", "recaptcha_v3": "v3"}
+DEFAULT_V3_ACTION = "verify"
+DEFAULT_V3_MIN_SCORE = 0.3
+_MIN_SCORE_RANGE = (0.1, 0.9)
+
+
+class CaptchaRequest(NamedTuple):
+    """One captcha a plugin asked the relay to solve."""
+    provider: str
+    site_key: str
+    site_url: str
+    invisible: bool = False
+    version: str = "v2"
+    action: str | None = None
+    min_score: float | None = None
 
 
 class SolveRejected(Exception):
@@ -56,12 +76,15 @@ def vendor_configured():
     return bool(os.environ.get("ANTICAPTCHA_CLASS") and os.environ.get("ANTICAPTCHA_ACCOUNT_KEY"))
 
 
-def solve_with_vendor(site_key, site_url, invisible, provider):
+def solve_with_vendor(captcha):
     """The response token from the user's vendor, or None when it did not solve it."""
     from subliminal_patch.pitcher import pitchers
 
     pitcher_cls = pitchers.get_pitcher()
-    pitcher = pitcher_cls(provider, site_url, site_key, tries=1, is_invisible=invisible)
+    pitcher = pitcher_cls(
+        captcha.provider, captcha.site_url, captcha.site_key, tries=1, is_invisible=captcha.invisible,
+        version=captcha.version, action=captcha.action, min_score=captcha.min_score,
+    )
     # A pitcher's own wait can be longer than the plugin is told to allow.
     if isinstance(getattr(pitcher, "timeout", None), (int, float)):
         pitcher.timeout = min(pitcher.timeout, SOLVE_TIMEOUT_SECONDS)
@@ -88,7 +111,19 @@ def _parse_request(body):
     provider = payload.get("provider") or "provider_hub"
     if not isinstance(provider, str) or not _PROVIDER_RE.match(provider):
         raise SolveRejected(400, "provider is malformed")
-    return site_key, site_url, invisible, provider
+    version = _TYPES.get(payload.get("type") or "recaptcha_v2")
+    if version is None:
+        raise SolveRejected(400, "only recaptcha_v2 and recaptcha_v3 captchas are supported")
+    if version != "v3":
+        return CaptchaRequest(provider, site_key, site_url, invisible)
+    action = payload.get("action") or DEFAULT_V3_ACTION
+    if not isinstance(action, str) or not _ACTION_RE.match(action):
+        raise SolveRejected(400, "action is malformed")
+    min_score = payload.get("min_score", DEFAULT_V3_MIN_SCORE)
+    if (isinstance(min_score, bool) or not isinstance(min_score, (int, float))
+            or not _MIN_SCORE_RANGE[0] <= min_score <= _MIN_SCORE_RANGE[1]):
+        raise SolveRejected(400, "min_score must be a number from 0.1 to 0.9")
+    return CaptchaRequest(provider, site_key, site_url, False, version, action, float(min_score))
 
 
 class CaptchaRelay:
@@ -142,7 +177,7 @@ class CaptchaRelay:
         ):
             return 401, {"error": "unauthorized"}
         try:
-            site_key, site_url, invisible, provider = _parse_request(body)
+            captcha = _parse_request(body)
         except SolveRejected as rejected:
             return rejected.status, {"error": rejected.message}
         if not self._vendor_ready():
@@ -150,11 +185,12 @@ class CaptchaRelay:
         if not self._slots.acquire(blocking=False):
             return 429, {"error": "the captcha relay is busy, try again later"}
         try:
-            logger.info("Provider Hub captcha relay: solving a captcha for %s", provider)
-            token = self._solve(site_key, site_url, invisible, provider)
+            logger.info("Provider Hub captcha relay: solving a reCAPTCHA %s for %s",
+                        captcha.version, captcha.provider)
+            token = self._solve(captcha)
         except Exception as error:
             logger.warning("Provider Hub captcha relay: the solve for %s failed: %s",
-                           provider, type(error).__name__)
+                           captcha.provider, type(error).__name__)
             return 502, {"error": "the anti-captcha service failed"}
         finally:
             self._slots.release()

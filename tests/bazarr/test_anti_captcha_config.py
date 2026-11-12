@@ -256,3 +256,113 @@ def test_2captcha_errors_name_2captcha(monkeypatch, caplog):
         assert solver.throw() is None
     assert "Bad 2Captcha API key" in caplog.text
     assert "CaptchaAI" not in caplog.text
+
+
+def test_2captcha_solves_a_recaptcha_v3_with_its_action_and_score(monkeypatch):
+    from subliminal_patch import pitcher as pitcher_module
+
+    monkeypatch.setattr(pitcher_module.time, "sleep", lambda _seconds: None)
+    session = _FakeVendorSession({"status": 1, "request": "job-3"}, [{"status": 1, "request": "v3-token"}])
+    cls = pitcher_module.pitchers.get_pitcher("TwoCaptchaProxyLess")
+    solver = cls("example", "https://example.org/form", "site-key", client_key="2c-key", tries=1,
+                 is_invisible=True, version="v3", action="login", min_score=0.7)
+    monkeypatch.setattr(solver, "get_client", lambda: session)
+
+    assert solver.throw() == "v3-token"
+    data = session.calls[0][2]
+    assert (data["method"], data["version"], data["action"], data["min_score"]) == (
+        "userrecaptcha", "v3", "login", 0.7)
+    # Invisibility is a v2 widget setting and is not sent with a v3 task.
+    assert "invisible" not in data
+
+
+@pytest.mark.parametrize("name", ["CaptchaAIProxyLess", "TwoCaptchaProxyLess"])
+def test_recaptcha_v3_defaults_to_the_vendors_action_and_score(name):
+    from subliminal_patch.pitcher import pitchers
+
+    params = pitchers.get_pitcher(name)("example", "https://example.org", "site-key", client_key="k",
+                                        version="v3").in_params
+    assert (params["version"], params["action"], params["min_score"]) == ("v3", "verify", 0.3)
+
+
+@pytest.mark.parametrize("name", ["CaptchaAIProxyLess", "TwoCaptchaProxyLess"])
+def test_recaptcha_v2_params_are_unchanged(name):
+    from subliminal_patch.pitcher import pitchers
+
+    params = pitchers.get_pitcher(name)("example", "https://example.org", "site-key", client_key="k").in_params
+    assert not {"version", "action", "min_score"} & set(params)
+
+
+def test_an_unknown_recaptcha_version_is_refused():
+    from subliminal_patch.pitcher import pitchers
+
+    with pytest.raises(ValueError):
+        pitchers.get_pitcher("TwoCaptchaProxyLess")("example", "https://example.org", "site-key",
+                                                    client_key="k", version="enterprise")
+
+
+@pytest.mark.parametrize("min_score, expected", [(0.1, 0.3), (0.3, 0.3), (0.5, 0.7), (0.7, 0.7), (0.8, 0.9), (0.9, 0.9)])
+def test_anticaptcha_rounds_a_v3_score_up_to_one_it_takes(min_score, expected):
+    from subliminal_patch.pitcher import anticaptcha_v3_min_score
+
+    assert anticaptcha_v3_min_score(min_score) == expected
+
+
+@pytest.mark.parametrize("name, needs_proxy", [("AntiCaptchaProxyLess", False), ("AntiCaptcha", True)])
+def test_anticaptcha_creates_a_proxyless_v3_task(name, needs_proxy):
+    from python_anticaptcha import RecaptchaV3TaskProxyless
+
+    from subliminal_patch.pitcher import pitchers
+
+    created = []
+    kwargs = {"proxy": "http://user:pass@proxy.local:3128", "user_agent": "UA/1.0"} if needs_proxy else {}
+    solver = pitchers.get_pitcher(name, with_proxy=needs_proxy)(
+        "example", "https://example.org/form", "site-key", client_key="ac-key",
+        version="v3", action="login", min_score=0.5, **kwargs)
+    solver.client = SimpleNamespace(createTask=created.append)
+
+    solver.get_job()
+
+    task = created[0]
+    assert isinstance(task, RecaptchaV3TaskProxyless)
+    assert (task.websiteKey, task.pageAction, task.minScore) == ("site-key", "login", 0.7)
+
+
+def test_anticaptcha_v2_task_is_unchanged():
+    from python_anticaptcha import NoCaptchaTaskProxylessTask
+
+    from subliminal_patch.pitcher import pitchers
+
+    created = []
+    solver = pitchers.get_pitcher("AntiCaptchaProxyLess")("example", "https://example.org", "site-key",
+                                                          client_key="ac-key", is_invisible=True)
+    solver.client = SimpleNamespace(createTask=created.append)
+
+    solver.get_job()
+
+    assert isinstance(created[0], NoCaptchaTaskProxylessTask)
+
+
+@pytest.mark.parametrize("version, token_type, extra", [
+    (None, 4, {}),
+    ("v3", 5, {"action": "login", "min_score": 0.7}),
+])
+def test_deathbycaptcha_sends_the_token_type_for_the_version(version, token_type, extra):
+    import json
+
+    from subliminal_patch.pitcher import pitchers
+
+    decoded = []
+
+    class _Client:
+        def decode(self, timeout=None, type=None, token_params=None):
+            decoded.append((type, json.loads(token_params)))
+            return {"is_correct": True, "text": "dbc-token"}
+
+    solver = pitchers.get_pitcher("DeathByCaptchaProxyLess")(
+        "example", "https://example.org/form", "site-key", client_key="user:pass", tries=1,
+        version=version, action="login", min_score=0.7)
+    solver.get_client = lambda: _Client()
+
+    assert solver.throw() == "dbc-token"
+    assert decoded == [(token_type, {"googlekey": "site-key", "pageurl": "https://example.org/form", **extra})]

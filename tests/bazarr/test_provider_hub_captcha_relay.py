@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from provider_hub.captcha_relay import CaptchaRequest
+
 
 @pytest.fixture
 def vendor_env(monkeypatch):
@@ -40,8 +42,8 @@ def _relay(solved="solved-token", vendor_ready=True):
 
     calls = []
 
-    def solve(site_key, site_url, invisible, provider):
-        calls.append((site_key, site_url, invisible, provider))
+    def solve(captcha):
+        calls.append(captcha)
         if isinstance(solved, Exception):
             raise solved
         return solved
@@ -66,12 +68,38 @@ def test_relay_solves_with_the_vendor_and_returns_the_token():
     status, payload = relay.handle(f"Bearer {relay.token}", _body())
 
     assert (status, payload) == (200, {"token": "solved-token"})
-    assert calls == [(
-        "6Lf6Yu8SAAAAAG-4tMd_7yKjgCCWlO43_xYDuaPP",
-        "https://www.subs4series.com/getSub-tkABC.html",
-        False,
-        "subs4series",
+    assert calls == [CaptchaRequest(
+        provider="subs4series",
+        site_key="6Lf6Yu8SAAAAAG-4tMd_7yKjgCCWlO43_xYDuaPP",
+        site_url="https://www.subs4series.com/getSub-tkABC.html",
+        invisible=False,
+        version="v2",
     )]
+
+
+def test_relay_solves_a_recaptcha_v3_with_its_action_and_score():
+    relay, calls = _relay()
+    body = _body(type="recaptcha_v3", action="examples/v3scores", min_score=0.7, invisible=None)
+
+    assert relay.handle(f"Bearer {relay.token}", body) == (200, {"token": "solved-token"})
+    assert calls[0].version == "v3"
+    assert (calls[0].action, calls[0].min_score) == ("examples/v3scores", 0.7)
+
+
+def test_relay_fills_in_the_v3_defaults():
+    relay, calls = _relay()
+
+    assert relay.handle(f"Bearer {relay.token}", _body(type="recaptcha_v3"))[0] == 200
+    assert (calls[0].version, calls[0].action, calls[0].min_score) == ("v3", "verify", 0.3)
+    # Invisibility is a v2 widget setting; a v3 task never carries it.
+    assert calls[0].invisible is False
+
+
+def test_relay_reads_an_explicit_recaptcha_v2_type():
+    relay, calls = _relay()
+
+    assert relay.handle(f"Bearer {relay.token}", _body(type="recaptcha_v2", invisible=True))[0] == 200
+    assert (calls[0].version, calls[0].invisible, calls[0].action) == ("v2", True, None)
 
 
 @pytest.mark.parametrize("authorization", [None, "", "Bearer wrong", "token-without-bearer"])
@@ -91,6 +119,13 @@ def test_relay_refuses_a_request_without_its_token(authorization):
     _body(site_url="https://"),
     _body(invisible="yes"),
     _body(provider="Not A Provider"),
+    _body(type="hcaptcha"),
+    _body(type="image_to_text"),
+    _body(type="recaptcha_v3", action="has spaces"),
+    _body(type="recaptcha_v3", min_score=1.5),
+    _body(type="recaptcha_v3", min_score=0.0),
+    _body(type="recaptcha_v3", min_score="0.7"),
+    _body(type="recaptcha_v3", min_score=True),
 ])
 def test_relay_refuses_a_malformed_request(body):
     relay, calls = _relay()
@@ -107,7 +142,7 @@ def test_relay_accepts_the_url_field_subs4series_also_sends():
     body = _body(site_url=None, url="https://www.subs4series.com/getSub-tkABC.html")
 
     assert relay.handle(f"Bearer {relay.token}", body)[0] == 200
-    assert calls[0][1] == "https://www.subs4series.com/getSub-tkABC.html"
+    assert calls[0].site_url == "https://www.subs4series.com/getSub-tkABC.html"
 
 
 def test_relay_answers_503_without_a_configured_vendor():
@@ -302,7 +337,7 @@ def test_relay_handles_concurrent_requests():
     gate = threading.Event()
     from provider_hub.captcha_relay import CaptchaRelay
 
-    def slow_solve(site_key, site_url, invisible, provider):
+    def slow_solve(captcha):
         gate.wait(5)
         return "slow-token"
 
@@ -326,3 +361,29 @@ def test_relay_handles_concurrent_requests():
     finally:
         relay.stop()
     assert sorted(status for status, _ in results) == [200, 200, 429]
+
+
+def test_solve_with_vendor_hands_the_v3_details_to_the_pitcher(monkeypatch, vendor_env):
+    from subliminal_patch import pitcher as pitcher_module
+
+    from provider_hub import captcha_relay
+
+    made = []
+
+    class _Pitcher:
+        timeout = 600
+
+        def __init__(self, *args, **kwargs):
+            made.append((args, kwargs))
+            self.timeout = 600
+
+        def throw(self):
+            return "vendor-token"
+
+    monkeypatch.setattr(pitcher_module.pitchers, "get_pitcher", lambda: _Pitcher)
+    captcha = CaptchaRequest("example", "site-key", "https://example.org/form", False, "v3", "login", 0.7)
+
+    assert captcha_relay.solve_with_vendor(captcha) == "vendor-token"
+    args, kwargs = made[0]
+    assert args == ("example", "https://example.org/form", "site-key")
+    assert kwargs == {"tries": 1, "is_invisible": False, "version": "v3", "action": "login", "min_score": 0.7}
