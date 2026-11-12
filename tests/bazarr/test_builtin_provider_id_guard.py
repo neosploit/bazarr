@@ -114,6 +114,7 @@ PINNED_RESERVED_SETTINGS_SECTIONS = frozenset({
     "sportarr",
     "subsync",
     "translator",
+    "twocaptcha",
 })
 
 _CATALOG_HINT = (

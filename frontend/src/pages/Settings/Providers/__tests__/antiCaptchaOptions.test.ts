@@ -8,6 +8,12 @@ describe("anti-captcha vendor options", () => {
     expect(captchaai?.label).toBe("CaptchaAI");
   });
 
+  it("offers 2Captcha with the backend's validator value", () => {
+    const twocaptcha = antiCaptchaOption.find((o) => o.value === "2captcha");
+    expect(twocaptcha).toBeDefined();
+    expect(twocaptcha?.label).toBe("2Captcha");
+  });
+
   it("keeps the existing vendors selectable", () => {
     const values = antiCaptchaOption.map((o) => o.value);
     expect(values).toContain("anti-captcha");

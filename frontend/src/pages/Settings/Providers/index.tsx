@@ -279,6 +279,17 @@ const AntiCaptchaSection: FunctionComponent = () => (
       <Anchor href="https://captchaai.com">CaptchaAI.com</Anchor>
       <Message>Link to subscribe</Message>
     </CollapseBox>
+    <CollapseBox
+      settingKey="settings-general-anti_captcha_provider"
+      on={(value) => value === "2captcha"}
+    >
+      <Password
+        label="API Key"
+        settingKey="settings-twocaptcha-twocaptcha_key"
+      />
+      <Anchor href="https://2captcha.com">2Captcha.com</Anchor>
+      <Message>Link to subscribe</Message>
+    </CollapseBox>
   </Stack>
 );
 

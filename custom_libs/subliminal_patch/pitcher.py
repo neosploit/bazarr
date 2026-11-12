@@ -260,6 +260,7 @@ class DBCPitcher(DBCProxyLessPitcher):
 class CaptchaAIProxyLessPitcher(Pitcher):
     name = "CaptchaAIProxyLess"
     source = "captchaai.com"
+    vendor_name = "CaptchaAI"
     host = "https://ocr.captchaai.com"
     timeout = 180
 
@@ -274,7 +275,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
 
     def get_client(self):
         # CaptchaAI exposes a 2Captcha-compatible HTTP API (in.php/res.php), so a
-        # plain requests session is all that is needed.
+        # plain requests session is all that is needed, for 2Captcha itself too.
         return requests.Session()
 
     def get_job(self):
@@ -317,9 +318,9 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                         time.sleep(5.0)
                         continue
                     elif request in ("ERROR_KEY_DOES_NOT_EXIST", "ERROR_WRONG_USER_KEY"):
-                        logger.error("%s: Bad CaptchaAI API key", self.website_name)
+                        logger.error("%s: Bad %s API key", self.website_name, self.vendor_name)
                         return
-                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name, request)
+                    logger.error("%s: %s returned an error: %s", self.website_name, self.vendor_name, request)
                     if i >= self.tries - 1:
                         return
                     time.sleep(5.0)
@@ -344,7 +345,7 @@ class CaptchaAIProxyLessPitcher(Pitcher):
                         return res_payload.get("request")
                     if res_payload.get("request") == "CAPCHA_NOT_READY":
                         continue
-                    logger.error("%s: CaptchaAI returned an error: %s", self.website_name,
+                    logger.error("%s: %s returned an error: %s", self.website_name, self.vendor_name,
                                  res_payload.get("request"))
                     poll_failed = True
                     break
@@ -375,6 +376,37 @@ class CaptchaAIPitcher(CaptchaAIProxyLessPitcher):
     @property
     def in_params(self):
         params = super(CaptchaAIPitcher, self).in_params
+        if self.proxy:
+            params.update({"proxy": self.proxy, "proxytype": self.proxy_type})
+        return params
+
+
+@registry.register
+class TwoCaptchaProxyLessPitcher(CaptchaAIProxyLessPitcher):
+    # 2Captcha is the API CaptchaAI copies (in.php/res.php, the same parameters and
+    # replies), so only the host and the names differ.
+    name = "TwoCaptchaProxyLess"
+    source = "2captcha.com"
+    vendor_name = "2Captcha"
+    host = "https://2captcha.com"
+
+
+@registry.register
+class TwoCaptchaPitcher(TwoCaptchaProxyLessPitcher):
+    name = "TwoCaptcha"
+    proxy = None
+    needs_proxy = True
+    proxy_type = "HTTP"
+
+    def __init__(self, *args, **kwargs):
+        # No default: a pitcher that declares needs_proxy must fail loudly
+        # when constructed without one, like the other proxy pitchers.
+        self.proxy = kwargs.pop("proxy")
+        super(TwoCaptchaPitcher, self).__init__(*args, **kwargs)
+
+    @property
+    def in_params(self):
+        params = super(TwoCaptchaPitcher, self).in_params
         if self.proxy:
             params.update({"proxy": self.proxy, "proxytype": self.proxy_type})
         return params
